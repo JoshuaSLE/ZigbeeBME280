@@ -22,6 +22,8 @@
 #define BME280_REG_CTRL_MEAS 0xF4
 
 #define BME280_REG_STATUS 0xF3
+#define BME280_STATUS_READY 0
+#define BME280_STATUS_MEASURING (1 << 3)
 #define BME280_STATUS_IM_UPDATE (1 << 0)
 
 #define BME280_REG_CTRL_HUM 0xF2
@@ -31,6 +33,9 @@
 
 #define BME280_REG_ID 0xD0
 #define BME280_CHIP_ID 0x60
+
+#define BME280_REG_COMP_1 0x88
+#define BME280_REG_COMP_2 0xE1
 
 #define BME280_CALIB_T1 0x88
 #define BME280_CALIB_T2 0x8A
@@ -115,10 +120,7 @@ typedef struct bme280_config {
 /**
  * @brief Context struct for BME280
  */
-struct bme280_context {
-  bme280_config_t config;
-  i2c_master_dev_handle_t i2c_dev;
-};
+struct bme280_context;
 
 /**
  * @brief Handle for BME280
