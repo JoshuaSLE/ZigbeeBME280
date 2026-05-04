@@ -314,14 +314,25 @@ esp_err_t bme280_read(bme280_handle_t handle, float *temp, float *pres,
     return ESP_ERR_INVALID_ARG;
   }
 
+  esp_err_t ret;
+
+  if (handle->config.mode == BME280_MODE_FORCED) {
+    uint8_t ctrl_meas = ((handle->config.temp_oversampling & 0x07) << 5) |
+                        ((handle->config.press_oversampling & 0x07) << 2) |
+                        (handle->config.mode & 0x03);
+    ret = bme280_write_reg(handle, BME280_REG_CTRL_MEAS, &ctrl_meas, 1);
+    if (ret != ESP_OK)
+      return ret;
+  }
+
   while (bme280_busy(handle))
     ;
 
   uint8_t data[8];
-  esp_err_t err = bme280_read_reg(handle, BME280_REG_DATA_START, data,
-                                  sizeof(data) / sizeof(data[0]));
-  if (err != ESP_OK)
-    return err;
+  ret = bme280_read_reg(handle, BME280_REG_DATA_START, data,
+                        sizeof(data) / sizeof(data[0]));
+  if (ret != ESP_OK)
+    return ret;
 
   int32_t adc_P =
       (int32_t)(((uint32_t)data[0] << 12) | ((uint32_t)data[1] << 4) |
@@ -331,10 +342,8 @@ esp_err_t bme280_read(bme280_handle_t handle, float *temp, float *pres,
                 ((uint32_t)data[5] >> 4));
   int32_t adc_H = (int32_t)(((uint32_t)data[6] << 8) | (uint32_t)data[7]);
 
-  ESP_LOGI(TAG, "p: %u, t: %u, h %u", adc_P, adc_T, adc_H);
-
   *temp = bme280_compensate_temp(handle, adc_T);
-  *pres = bme280_compensate_press(handle, adc_P);
+  *pres = (float)bme280_compensate_press(handle, adc_P);
   *hum = bme280_compensate_hum(handle, adc_H);
 
   return ESP_OK;
