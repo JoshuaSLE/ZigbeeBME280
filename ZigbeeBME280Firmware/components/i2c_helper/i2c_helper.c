@@ -47,15 +47,25 @@ void i2c_init() {
   ESP_ERROR_CHECK(bme280_init(bus_hdl, &bme280_cfg, &bme280_hdl));
 
   vcnl4010_config_t vcnl4010_cfg = {
-      .command = VCNL4010_CMD_SELFTIMED_EN | VCNL4010_CMD_PROX_EN,
-      .ir_led_current = VCNL4010_IR_LED_150MA,
-      .prox_rate = VCNL4010_PROX_RATE_31_25,
-      .als_en = false,
-      .threshold_en = true,
-      .threshold_sel = VNCL4010_THRESH_SEL_PROX,
-      .int_count = VCNL4010_INT_COUNT_2,
-      .high_threshold = 2500,
-      .low_threshold = 0,
+      .enable_proximity = true,
+      .enable_als = false,
+      .ir_led_current = VCNL4010_IR_LED_120MA,
+      .prox_rate = VCNL4010_PROX_RATE_16_63,
+      .als =
+          {
+              .continuous_mode = false,
+              .offset_compensation = true,
+          },
+      .interrupts =
+          {
+              .enable = true,
+              .low_threshold = 0,
+              .high_threshold = 2350,
+              .count = VCNL4010_INT_COUNT_2,
+              .use_als = false,
+              .enable_prox_ready = false,
+              .enable_als_ready = false,
+          },
   };
   ESP_ERROR_CHECK(vcnl4010_init(bus_hdl, &vcnl4010_cfg, &vcnl4010_hdl));
 
@@ -86,6 +96,7 @@ void i2c_deinit() {
 
   if (bus_hdl != NULL) {
     ESP_ERROR_CHECK(i2c_del_master_bus(bus_hdl));
+    bus_hdl = NULL;
   }
 
   gpio_reset_pin(CONFIG_I2C_MASTER_SDA);

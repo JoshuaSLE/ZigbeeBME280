@@ -47,14 +47,6 @@ typedef enum vcnl4010_cmd {
   VCNL4010_CMD_ALS_DATA_RDY = (1 << 6),  // ALS result ready (read-only)
 } vcnl4010_cmd_t;
 
-// --- Interrupt status bits (0x8E) ---
-typedef enum vcnl4010_int_status {
-  VCNL4010_INT_THRESH_HI = (1 << 0), // proximity above high threshold
-  VCNL4010_INT_THRESH_LO = (1 << 1), // proximity below low threshold
-  VCNL4010_INT_ALS_RDY = (1 << 2),   // ALS data ready
-  VCNL4010_INT_PROX_RDY = (1 << 3),  // proximity data ready
-} vcnl4010_int_status_t;
-
 // --- IR LED current (0x82), 10mA per step, 0–200mA ---
 typedef enum vcnl4010_ir_led_current {
   VCNL4010_IR_LED_0MA = 0,
@@ -124,39 +116,32 @@ typedef enum vcnl4010_int_count {
   VCNL4010_INT_COUNT_8 = 3,
 } vcnl4010_int_count_t;
 
-// --- Threshold selection ---
-typedef enum vcnl4010_threshold_selection {
-  VCNL4010_THRESH_SEL_PROX = 0,
-  VCNL4010_THRESH_SEL_ALS = 1,
-} vcnl4010_threshold_selection_t;
-
 // --- Configuration struct ---
 typedef struct vcnl4010_config {
-  /* --- System Control --- */
-  vcnl4010_cmd_t command; // Enables/Disables measuring cycles
+  // --- Essential Settings ---
+  bool enable_proximity;                    // Enable proximity sensing
+  bool enable_als;                          // Enable ambient light sensing
+  vcnl4010_ir_led_current_t ir_led_current; // 0-20
+  vcnl4010_prox_rate_t prox_rate;           // 0-7
 
-  /* --- LED & Hardware Settings --- */
-  vcnl4010_ir_led_current_t ir_led_current; //  Sets IR emitter power
-  vcnl4010_prox_rate_t prox_rate; // Sets proximity measurements per second
+  // --- ALS Advanced Settings
+  struct {
+    bool continuous_mode;               // Enable continuous conversion
+    vcnl4010_als_rate_t rate;           // 0-7
+    vcnl4010_als_averaging_t averaging; // 0-7
+    bool offset_compensation;           // Enable offset compensation
+  } als;
 
-  /* --- Ambient Light Sensor (ALS) Settings --- */
-  bool als_continuous;          // Enable continuous conversion mode
-  vcnl4010_als_rate_t als_rate; // Sets ALS measurements per second
-  bool offset_comp;             // Enable automatic offset compensation
-  vcnl4010_als_averaging_t
-      als_averaging; // Samples to average per ALS measurement
-
-  /* --- Interrupt Configuration --- */
-  vcnl4010_int_count_t int_count; // Number of consecutive hits to trigger INT
-  bool prox_en;                   // Enable proximity-ready interrupt
-  bool als_en;                    // Enable ALS-ready interrupt
-  bool threshold_en;              // Enable threshold-based interrupt logic
-  vcnl4010_threshold_selection_t
-      threshold_sel; // Choose Proximity (0) or ALS (1) for threshold
-
-  /* --- Threshold Window Limits --- */
-  uint16_t low_threshold;  // Lower trigger boundary for the INT pin
-  uint16_t high_threshold; // Upper trigger boundary for the INT pin
+  // --- Interrupt Settings
+  struct {
+    bool enable;                // Enable thresholds
+    uint16_t low_threshold;     // Lower boundary
+    uint16_t high_threshold;    // Upper boundary
+    vcnl4010_int_count_t count; // 0-3
+    bool use_als;               // true=ALS, false=Proximity (default)
+    bool enable_prox_ready;     // Enable proximity-ready interrupt
+    bool enable_als_ready;      // Enable ALS-ready interrupt
+  } interrupts;
 } vcnl4010_config_t;
 
 // --- Context struct ---

@@ -59,7 +59,6 @@ esp_err_t vcnl4010_init(i2c_master_bus_handle_t bus, vcnl4010_config_t *config,
       .device_address = VCNL4010_I2C_ADDR,
       .scl_speed_hz = 100000,
   };
-
   ESP_GOTO_ON_ERROR(
       i2c_master_bus_add_device(bus, &i2c_dev_config, &dev->i2c_dev),
       fail_alloc, TAG, "Failed to add I2C device to bus");
@@ -72,48 +71,75 @@ esp_err_t vcnl4010_init(i2c_master_bus_handle_t bus, vcnl4010_config_t *config,
     goto fail_device;
   }
 
-  data[0] = dev->config.ir_led_current & 0x1F;
+  // --- Configure IR LED Current ---
+  uint8_t led_current = dev->config.ir_led_current & 0x1F;
   ESP_GOTO_ON_ERROR(
-      vcnl4010_write_reg(dev, VCNL4010_REG_IR_LED_CURRENT, data, 1),
+      vcnl4010_write_reg(dev, VCNL4010_REG_IR_LED_CURRENT, &led_current, 1),
       fail_device, TAG, "Failed to set led current");
 
-  data[0] = dev->config.prox_rate & 0x7;
-  ESP_GOTO_ON_ERROR(vcnl4010_write_reg(dev, VCNL4010_REG_PROX_RATE, data, 1),
-                    fail_device, TAG, "Failed to set proximity rate");
+  // --- Configure Proximity Rate ---
+  uint8_t prox_rate = dev->config.prox_rate & 0x7;
+  ESP_GOTO_ON_ERROR(
+      vcnl4010_write_reg(dev, VCNL4010_REG_PROX_RATE, &prox_rate, 1),
+      fail_device, TAG, "Failed to set proximity rate");
 
-  data[0] = ((dev->config.als_continuous & 0x1) << 7) |
-            ((dev->config.als_rate & 0x7) << 4) |
-            ((dev->config.offset_comp & 0x1) << 3) |
-            (dev->config.als_averaging & 0x7);
-  ESP_GOTO_ON_ERROR(vcnl4010_write_reg(dev, VCNL4010_REG_ALS_PARAM, data, 1),
-                    fail_device, TAG, "Failed to set ambient config");
+  // --- Configure ALS Parameters ---
+  uint8_t als_param = 0;
+  als_param |= (dev->config.als.continuous_mode ? 1 : 0) << 7;
+  als_param |= (dev->config.als.rate & 0x7) << 4;
+  als_param |= (dev->config.als.offset_compensation ? 1 : 0) << 3;
+  als_param |= (dev->config.als.averaging & 0x7);
+  ESP_GOTO_ON_ERROR(
+      vcnl4010_write_reg(dev, VCNL4010_REG_ALS_PARAM, &als_param, 1),
+      fail_device, TAG, "Failed to set ambient config");
 
-  data[0] = (uint8_t)((dev->config.low_threshold & 0xFF00) >> 8);
-  data[1] = (uint8_t)(dev->config.low_threshold & 0xFF);
-  ESP_RETURN_ON_ERROR(
-      vcnl4010_write_reg(dev, VCNL4010_REG_LOW_THRESH_H, data, 2), TAG,
-      "Failed to set low threshold");
+  // --- Configure Thresholds (only if enabled) ---
 
-  data[0] = (uint8_t)((dev->config.high_threshold & 0xFF00) >> 8);
-  data[1] = (uint8_t)(dev->config.high_threshold & 0xFF);
-  ESP_RETURN_ON_ERROR(
-      vcnl4010_write_reg(dev, VCNL4010_REG_HIGH_THRESH_H, data, 2), TAG,
-      "Failed to set high threshold");
+  if (dev->config.interrupts.enable) {
+    uint8_t low_data[2];
+    low_data[0] =
+        (uint8_t)((dev->config.interrupts.low_threshold & 0xFF00) >> 8);
+    low_data[1] = (uint8_t)(dev->config.interrupts.low_threshold & 0xFF);
+    ESP_GOTO_ON_ERROR(
+        vcnl4010_write_reg(dev, VCNL4010_REG_LOW_THRESH_H, low_data, 2),
+        fail_device, TAG, "Failed to set low threshold");
 
-  data[0] = ((dev->config.int_count & 0x03) << 5) |
-            ((dev->config.prox_en & 0x01) << 3) |
-            ((dev->config.als_en & 0x01) << 2) |
-            ((dev->config.threshold_en & 0x01) << 1) |
-            (dev->config.threshold_sel & 0x01);
-  ESP_GOTO_ON_ERROR(vcnl4010_write_reg(dev, VCNL4010_REG_INT_CTRL, data, 1),
-                    fail_device, TAG, "Failed to set interrupt config");
+    uint8_t high_data[2];
+    high_data[0] =
+        (uint8_t)((dev->config.interrupts.high_threshold & 0xFF00) >> 8);
+    high_data[1] = (uint8_t)(dev->config.interrupts.high_threshold & 0xFF);
+    ESP_GOTO_ON_ERROR(
+        vcnl4010_write_reg(dev, VCNL4010_REG_HIGH_THRESH_H, high_data, 2),
+        fail_device, TAG, "Failed to set high threshold");
+  }
 
-  // clear all the pending interrupts
-  data[0] = 0xFF;
-  vcnl4010_write_reg(dev, VCNL4010_REG_INT_STATUS, data, 1);
+  // --- Configure Interrupt Control ---
+  uint8_t int_ctrl = 0;
+  int_ctrl |= (dev->config.interrupts.count & 0x03) << 4;
+  int_ctrl |= (dev->config.interrupts.enable_prox_ready ? 1 : 0) << 3;
+  int_ctrl |= (dev->config.interrupts.enable_als_ready ? 1 : 0) << 2;
+  int_ctrl |= (dev->config.interrupts.enable ? 1 : 0) << 1;
+  int_ctrl |= (dev->config.interrupts.use_als ? 1 : 0);
+  ESP_GOTO_ON_ERROR(
+      vcnl4010_write_reg(dev, VCNL4010_REG_INT_CTRL, &int_ctrl, 1), fail_device,
+      TAG, "Failed to set interrupt config");
 
-  data[0] = dev->config.command;
-  ESP_GOTO_ON_ERROR(vcnl4010_write_reg(dev, VCNL4010_REG_COMMAND, data, 1),
+  ESP_GOTO_ON_ERROR(vcnl4010_reset_interrupt(dev), fail_device, TAG,
+                    "Failed to clear interrupts");
+
+  // --- Configure Command Register ---
+  uint8_t command = 0;
+  if (dev->config.enable_proximity) {
+    command |= VCNL4010_CMD_PROX_EN;
+  }
+  if (dev->config.enable_als) {
+    command |= VCNL4010_CMD_ALS_EN;
+  }
+  if (dev->config.enable_proximity || dev->config.als.continuous_mode) {
+    command |= VCNL4010_CMD_SELFTIMED_EN;
+  }
+
+  ESP_GOTO_ON_ERROR(vcnl4010_write_reg(dev, VCNL4010_REG_COMMAND, &command, 1),
                     fail_device, TAG, "Failed to set command register");
 
   *handle = (vcnl4010_handle_t)dev;
