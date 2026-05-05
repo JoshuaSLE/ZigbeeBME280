@@ -3,7 +3,8 @@
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_log.h"
-
+#include "freertos/idf_additions.h"
+#include <stdint.h>
 #include <stdlib.h>
 
 static const char *TAG = "VCNL4010";
@@ -43,9 +44,15 @@ esp_err_t vcnl4010_init(i2c_master_bus_handle_t bus, vcnl4010_config_t *config,
   if (dev == NULL)
     return ESP_ERR_NO_MEM;
 
+  ESP_LOGI(TAG, "Initializing VCNL4010...");
+
   dev->config = *config;
 
-  ESP_LOGI(TAG, "Initializing VCNL4010...");
+  if (dev->config.ir_led_current > 20) {
+    ESP_LOGE(TAG, "Invalid IR LED current: %d", dev->config.ir_led_current);
+    free(dev);
+    return ESP_ERR_INVALID_ARG;
+  }
 
   const i2c_device_config_t i2c_dev_config = {
       .dev_addr_length = I2C_ADDR_BIT_LEN_7,
@@ -81,6 +88,18 @@ esp_err_t vcnl4010_init(i2c_master_bus_handle_t bus, vcnl4010_config_t *config,
   ESP_GOTO_ON_ERROR(vcnl4010_write_reg(dev, VCNL4010_REG_ALS_PARAM, data, 1),
                     fail_device, TAG, "Failed to set ambient config");
 
+  data[0] = (uint8_t)((dev->config.low_threshold & 0xFF00) >> 8);
+  data[1] = (uint8_t)(dev->config.low_threshold & 0xFF);
+  ESP_RETURN_ON_ERROR(
+      vcnl4010_write_reg(dev, VCNL4010_REG_LOW_THRESH_H, data, 2), TAG,
+      "Failed to set low threshold");
+
+  data[0] = (uint8_t)((dev->config.high_threshold & 0xFF00) >> 8);
+  data[1] = (uint8_t)(dev->config.high_threshold & 0xFF);
+  ESP_RETURN_ON_ERROR(
+      vcnl4010_write_reg(dev, VCNL4010_REG_HIGH_THRESH_H, data, 2), TAG,
+      "Failed to set high threshold");
+
   data[0] = ((dev->config.int_count & 0x03) << 5) |
             ((dev->config.prox_en & 0x01) << 3) |
             ((dev->config.als_en & 0x01) << 2) |
@@ -89,20 +108,9 @@ esp_err_t vcnl4010_init(i2c_master_bus_handle_t bus, vcnl4010_config_t *config,
   ESP_GOTO_ON_ERROR(vcnl4010_write_reg(dev, VCNL4010_REG_INT_CTRL, data, 1),
                     fail_device, TAG, "Failed to set interrupt config");
 
-  data[0] = (uint8_t)((dev->config.low_threshold & 0xFF00) >> 8);
-  data[1] = (uint8_t)(dev->config.low_threshold & 0xFF);
-  ESP_GOTO_ON_ERROR(vcnl4010_write_reg(dev, VCNL4010_REG_LOW_THRESH_H, data, 2),
-                    fail_device, TAG, "Failed to set low threshold");
-
-  data[0] = (uint8_t)((dev->config.high_threshold & 0xFF00) >> 8);
-  data[1] = (uint8_t)(dev->config.high_threshold & 0xFF);
-  ESP_GOTO_ON_ERROR(
-      vcnl4010_write_reg(dev, VCNL4010_REG_HIGH_THRESH_H, data, 2), fail_device,
-      TAG, "Failed to set high threshold");
-
   // clear all the pending interrupts
   data[0] = 0xFF;
-  vcnl4010_write_reg(dev, 0x0E, data, 1);
+  vcnl4010_write_reg(dev, VCNL4010_REG_INT_STATUS, data, 1);
 
   data[0] = dev->config.command;
   ESP_GOTO_ON_ERROR(vcnl4010_write_reg(dev, VCNL4010_REG_COMMAND, data, 1),
@@ -127,4 +135,31 @@ esp_err_t vcnl4010_deinit(vcnl4010_handle_t handle) {
   free(handle);
   ESP_LOGI(TAG, "VCNL4010 deinit.");
   return ret;
+}
+
+esp_err_t vcnl4010_get_ambient(vcnl4010_handle_t handle, uint16_t *value) {
+  if (handle == NULL)
+    return ESP_ERR_INVALID_ARG;
+  esp_err_t ret;
+  uint8_t data[2];
+  ret = vcnl4010_read_reg(handle, VCNL4010_REG_ALS_RESULT_H, data, 2);
+  *value = (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
+  return ret;
+}
+
+esp_err_t vcnl4010_get_proximity(vcnl4010_handle_t handle, uint16_t *value) {
+  if (handle == NULL)
+    return ESP_ERR_INVALID_ARG;
+  esp_err_t ret;
+  uint8_t data[2];
+  ret = vcnl4010_read_reg(handle, VCNL4010_REG_PROX_RESULT_H, data, 2);
+  *value = (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
+  return ret;
+}
+
+esp_err_t vcnl4010_reset_interrupt(vcnl4010_handle_t handle) {
+  if (handle == NULL)
+    return ESP_ERR_INVALID_ARG;
+  uint8_t data = 0xFF;
+  return vcnl4010_write_reg(handle, VCNL4010_REG_INT_STATUS, &data, 1);
 }

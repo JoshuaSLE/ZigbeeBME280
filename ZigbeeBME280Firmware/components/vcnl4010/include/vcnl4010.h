@@ -47,7 +47,7 @@ typedef enum vcnl4010_cmd {
   VCNL4010_CMD_ALS_DATA_RDY = (1 << 6),  // ALS result ready (read-only)
 } vcnl4010_cmd_t;
 
-// --- Interrupt status bits (0x8D) ---
+// --- Interrupt status bits (0x8E) ---
 typedef enum vcnl4010_int_status {
   VCNL4010_INT_THRESH_HI = (1 << 0), // proximity above high threshold
   VCNL4010_INT_THRESH_LO = (1 << 1), // proximity below low threshold
@@ -126,26 +126,37 @@ typedef enum vcnl4010_int_count {
 
 // --- Threshold selection ---
 typedef enum vcnl4010_threshold_selection {
-  VNCL4010_THRESH_SEL_PROX = 0,
-  VNCL4010_THRESH_SEL_ALS = 1,
+  VCNL4010_THRESH_SEL_PROX = 0,
+  VCNL4010_THRESH_SEL_ALS = 1,
 } vcnl4010_threshold_selection_t;
 
 // --- Configuration struct ---
 typedef struct vcnl4010_config {
-  vcnl4010_cmd_t command;
-  vcnl4010_ir_led_current_t ir_led_current;
-  vcnl4010_prox_rate_t prox_rate;
-  bool als_continuous;
-  vcnl4010_als_rate_t als_rate;
-  bool offset_comp;
-  vcnl4010_als_averaging_t als_averaging;
-  vcnl4010_int_count_t int_count;
-  bool prox_en;
-  bool als_en;
-  bool threshold_en;
-  vcnl4010_threshold_selection_t threshold_sel;
-  uint16_t low_threshold;
-  uint16_t high_threshold;
+  /* --- System Control --- */
+  vcnl4010_cmd_t command; // Enables/Disables measuring cycles
+
+  /* --- LED & Hardware Settings --- */
+  vcnl4010_ir_led_current_t ir_led_current; //  Sets IR emitter power
+  vcnl4010_prox_rate_t prox_rate; // Sets proximity measurements per second
+
+  /* --- Ambient Light Sensor (ALS) Settings --- */
+  bool als_continuous;          // Enable continuous conversion mode
+  vcnl4010_als_rate_t als_rate; // Sets ALS measurements per second
+  bool offset_comp;             // Enable automatic offset compensation
+  vcnl4010_als_averaging_t
+      als_averaging; // Samples to average per ALS measurement
+
+  /* --- Interrupt Configuration --- */
+  vcnl4010_int_count_t int_count; // Number of consecutive hits to trigger INT
+  bool prox_en;                   // Enable proximity-ready interrupt
+  bool als_en;                    // Enable ALS-ready interrupt
+  bool threshold_en;              // Enable threshold-based interrupt logic
+  vcnl4010_threshold_selection_t
+      threshold_sel; // Choose Proximity (0) or ALS (1) for threshold
+
+  /* --- Threshold Window Limits --- */
+  uint16_t low_threshold;  // Lower trigger boundary for the INT pin
+  uint16_t high_threshold; // Upper trigger boundary for the INT pin
 } vcnl4010_config_t;
 
 // --- Context struct ---
@@ -165,8 +176,31 @@ esp_err_t vcnl4010_init(i2c_master_bus_handle_t bus, vcnl4010_config_t *config,
                         vcnl4010_handle_t *handle);
 
 /**
- * @brief  VCNL4010 deinitialize   
+ * @brief  VCNL4010 deinitialize
  * @param  handle: VCNL4010 handle
  * @retval ESP Error code
  */
 esp_err_t vcnl4010_deinit(vcnl4010_handle_t handle);
+
+/**
+ * @brief  VCNL4010 get ambient value
+ * @param  handle: VCNL4010 handle
+ * @param  *value: VCNL4010 ambient value
+ * @retval ESP Error code
+ */
+esp_err_t vcnl4010_get_ambient(vcnl4010_handle_t handle, uint16_t *value);
+
+/**
+ * @brief  VCNL4010 get proximity value
+ * @param  handle: VCNL4010 handle
+ * @param  *value: VCNL4010 proximity value
+ * @retval ESP Error code
+ */
+esp_err_t vcnl4010_get_proximity(vcnl4010_handle_t handle, uint16_t *value);
+
+/**
+ * @brief  VCNL4010 reset interrupts
+ * @param  handle: VCNL4010 handle
+ * @retval ESP Error code
+ */
+esp_err_t vcnl4010_reset_interrupt(vcnl4010_handle_t handle);

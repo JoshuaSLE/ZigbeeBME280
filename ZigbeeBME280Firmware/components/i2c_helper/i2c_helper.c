@@ -7,6 +7,7 @@
 #include "freertos/projdefs.h"
 #include "sdkconfig.h"
 #include "ssd1306.h"
+#include "vcnl4010.h"
 
 static const char *TAG = "I2C Helper";
 
@@ -47,13 +48,13 @@ void i2c_init() {
 
   vcnl4010_config_t vcnl4010_cfg = {
       .command = VCNL4010_CMD_SELFTIMED_EN | VCNL4010_CMD_PROX_EN,
-      .ir_led_current = VCNL4010_IR_LED_100MA,
-      .prox_rate = VCNL4010_PROX_RATE_7_81,
+      .ir_led_current = VCNL4010_IR_LED_150MA,
+      .prox_rate = VCNL4010_PROX_RATE_31_25,
       .als_en = false,
       .threshold_en = true,
       .threshold_sel = VNCL4010_THRESH_SEL_PROX,
       .int_count = VCNL4010_INT_COUNT_2,
-      .high_threshold = 4500,
+      .high_threshold = 2500,
       .low_threshold = 0,
   };
   ESP_ERROR_CHECK(vcnl4010_init(bus_hdl, &vcnl4010_cfg, &vcnl4010_hdl));
