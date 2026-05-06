@@ -1,16 +1,25 @@
 #include "vcnl4010.h"
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_err.h"
+#include "esp_event.h"
 #include "esp_log.h"
+#include "freertos/idf_additions.h"
+#include "hal/gpio_types.h"
+#include "portmacro.h"
+
 #include <stdint.h>
 #include <stdlib.h>
 
 static const char *TAG = "VCNL4010";
 
+ESP_EVENT_DEFINE_BASE(VCNL4010_EVENTS);
+
 struct vcnl4010_context {
   vcnl4010_config_t config;
   i2c_master_dev_handle_t i2c_dev;
+  SemaphoreHandle_t int_sem;
 };
 
 static inline esp_err_t vcnl4010_read_reg(vcnl4010_handle_t handle, uint8_t reg,
@@ -35,11 +44,39 @@ static inline esp_err_t vcnl4010_write_reg(vcnl4010_handle_t handle,
                              sizeof(write_buffer), -1);
 }
 
-static esp_err_t vcnl4010_reset_interrupt(vcnl4010_handle_t handle) {
-  if (handle == NULL)
-    return ESP_ERR_INVALID_ARG;
-  uint8_t data = 0xFF;
-  return vcnl4010_write_reg(handle, VCNL4010_REG_INT_STATUS, &data, 1);
+static void IRAM_ATTR vcnl4010_isr_handler(void *arg) {
+  vcnl4010_handle_t handle = (vcnl4010_handle_t)arg;
+  xSemaphoreGiveFromISR(handle->int_sem, NULL);
+}
+
+static void vcnl4010_interrupt_task(void *arg) {
+  uint8_t status;
+  vcnl4010_handle_t handle = (vcnl4010_handle_t)arg;
+
+  while (1) {
+    if (xSemaphoreTake(handle->int_sem, portMAX_DELAY)) {
+      (void)vcnl4010_read_reg(handle, VCNL4010_REG_INT_STATUS, &status, 1);
+
+      if (status & VCNL4010_EVENT_THR_HI) {
+        (void)esp_event_post(VCNL4010_EVENTS, VCNL4010_EVENT_THR_HI, &handle,
+                             sizeof(vcnl4010_handle_t), portMAX_DELAY);
+      }
+      if (status & VCNL4010_EVENT_THR_LO) {
+        (void)esp_event_post(VCNL4010_EVENTS, VCNL4010_EVENT_THR_LO, &handle,
+                             sizeof(vcnl4010_handle_t), portMAX_DELAY);
+      }
+      if (status & VCNL4010_EVENT_ALS) {
+        (void)esp_event_post(VCNL4010_EVENTS, VCNL4010_EVENT_ALS, &handle,
+                             sizeof(vcnl4010_handle_t), portMAX_DELAY);
+      }
+      if (status & VCNL4010_EVENT_PROX) {
+        (void)esp_event_post(VCNL4010_EVENTS, VCNL4010_EVENT_PROX, &handle,
+                             sizeof(vcnl4010_handle_t), portMAX_DELAY);
+      }
+
+      (void)vcnl4010_write_reg(handle, VCNL4010_REG_INT_STATUS, &status, 1);
+    }
+  }
 }
 
 esp_err_t vcnl4010_init(i2c_master_bus_handle_t bus, vcnl4010_config_t *config,
@@ -78,74 +115,66 @@ esp_err_t vcnl4010_init(i2c_master_bus_handle_t bus, vcnl4010_config_t *config,
   }
 
   // --- Configure IR LED Current ---
-  uint8_t led_current = dev->config.ir_led_current & 0x1F;
+  data[0] = dev->config.ir_led_current & 0x1F;
   ESP_GOTO_ON_ERROR(
-      vcnl4010_write_reg(dev, VCNL4010_REG_IR_LED_CURRENT, &led_current, 1),
+      vcnl4010_write_reg(dev, VCNL4010_REG_IR_LED_CURRENT, data, 1),
       fail_device, TAG, "Failed to set led current");
 
   // --- Configure Proximity Rate ---
-  uint8_t prox_rate = dev->config.prox_rate & 0x7;
-  ESP_GOTO_ON_ERROR(
-      vcnl4010_write_reg(dev, VCNL4010_REG_PROX_RATE, &prox_rate, 1),
-      fail_device, TAG, "Failed to set proximity rate");
+  data[0] = dev->config.prox_rate & 0x7;
+  ESP_GOTO_ON_ERROR(vcnl4010_write_reg(dev, VCNL4010_REG_PROX_RATE, data, 1),
+                    fail_device, TAG, "Failed to set proximity rate");
 
   // --- Configure ALS Parameters ---
-  uint8_t als_param = 0;
-  als_param |= (dev->config.als.continuous_mode ? 1 : 0) << 7;
-  als_param |= (dev->config.als.rate & 0x7) << 4;
-  als_param |= (dev->config.als.offset_compensation ? 1 : 0) << 3;
-  als_param |= (dev->config.als.averaging & 0x7);
-  ESP_GOTO_ON_ERROR(
-      vcnl4010_write_reg(dev, VCNL4010_REG_ALS_PARAM, &als_param, 1),
-      fail_device, TAG, "Failed to set ambient config");
+  data[0] = ((dev->config.als.continuous_mode ? 1 : 0) << 7) |
+            ((dev->config.als.rate & 0x7) << 4) |
+            ((dev->config.als.offset_compensation ? 1 : 0) << 3) |
+            (dev->config.als.averaging & 0x7);
+  ESP_GOTO_ON_ERROR(vcnl4010_write_reg(dev, VCNL4010_REG_ALS_PARAM, data, 1),
+                    fail_device, TAG, "Failed to set ambient config");
 
   // --- Configure Thresholds (only if enabled) ---
-
   if (dev->config.interrupts.enable) {
-    uint8_t low_data[2];
-    low_data[0] =
-        (uint8_t)((dev->config.interrupts.low_threshold & 0xFF00) >> 8);
-    low_data[1] = (uint8_t)(dev->config.interrupts.low_threshold & 0xFF);
+    data[0] = (uint8_t)((dev->config.interrupts.low_threshold & 0xFF00) >> 8);
+    data[1] = (uint8_t)(dev->config.interrupts.low_threshold & 0xFF);
     ESP_GOTO_ON_ERROR(
-        vcnl4010_write_reg(dev, VCNL4010_REG_LOW_THRESH_H, low_data, 2),
+        vcnl4010_write_reg(dev, VCNL4010_REG_LOW_THRESH_H, data, 2),
         fail_device, TAG, "Failed to set low threshold");
 
-    uint8_t high_data[2];
-    high_data[0] =
-        (uint8_t)((dev->config.interrupts.high_threshold & 0xFF00) >> 8);
-    high_data[1] = (uint8_t)(dev->config.interrupts.high_threshold & 0xFF);
+    data[0] = (uint8_t)((dev->config.interrupts.high_threshold & 0xFF00) >> 8);
+    data[1] = (uint8_t)(dev->config.interrupts.high_threshold & 0xFF);
     ESP_GOTO_ON_ERROR(
-        vcnl4010_write_reg(dev, VCNL4010_REG_HIGH_THRESH_H, high_data, 2),
+        vcnl4010_write_reg(dev, VCNL4010_REG_HIGH_THRESH_H, data, 2),
         fail_device, TAG, "Failed to set high threshold");
   }
 
   // --- Configure Interrupt Control ---
-  uint8_t int_ctrl = 0;
-  int_ctrl |= (dev->config.interrupts.count & 0x03) << 4;
-  int_ctrl |= (dev->config.interrupts.enable_prox_ready ? 1 : 0) << 3;
-  int_ctrl |= (dev->config.interrupts.enable_als_ready ? 1 : 0) << 2;
-  int_ctrl |= (dev->config.interrupts.enable ? 1 : 0) << 1;
-  int_ctrl |= (dev->config.interrupts.use_als ? 1 : 0);
+  uint8_t int_ctrl = ((dev->config.interrupts.count & 0x03) << 4) |
+                     ((dev->config.interrupts.enable_prox_ready ? 1 : 0) << 3) |
+                     ((dev->config.interrupts.enable_als_ready ? 1 : 0) << 2) |
+                     ((dev->config.interrupts.enable ? 1 : 0) << 1) |
+                     (dev->config.interrupts.use_als ? 1 : 0);
   ESP_GOTO_ON_ERROR(
       vcnl4010_write_reg(dev, VCNL4010_REG_INT_CTRL, &int_ctrl, 1), fail_device,
       TAG, "Failed to set interrupt config");
 
-  ESP_GOTO_ON_ERROR(vcnl4010_reset_interrupt(dev), fail_device, TAG,
-                    "Failed to clear interrupts");
+  data[0] = 0xFF;
+  ESP_GOTO_ON_ERROR(vcnl4010_write_reg(dev, VCNL4010_REG_INT_STATUS, data, 1),
+                    fail_device, TAG, "Failed to clear interrupts");
 
   // --- Configure Command Register ---
-  uint8_t command = 0;
+  data[0] = 0;
   if (dev->config.enable_proximity) {
-    command |= VCNL4010_CMD_PROX_EN;
+    data[0] |= VCNL4010_CMD_PROX_EN;
   }
   if (dev->config.enable_als) {
-    command |= VCNL4010_CMD_ALS_EN;
+    data[0] |= VCNL4010_CMD_ALS_EN;
   }
   if (dev->config.enable_proximity || dev->config.als.continuous_mode) {
-    command |= VCNL4010_CMD_SELFTIMED_EN;
+    data[0] |= VCNL4010_CMD_SELFTIMED_EN;
   }
 
-  ESP_GOTO_ON_ERROR(vcnl4010_write_reg(dev, VCNL4010_REG_COMMAND, &command, 1),
+  ESP_GOTO_ON_ERROR(vcnl4010_write_reg(dev, VCNL4010_REG_COMMAND, data, 1),
                     fail_device, TAG, "Failed to set command register");
 
   *handle = (vcnl4010_handle_t)dev;
@@ -199,4 +228,40 @@ esp_err_t vcnl4010_clear_int_status(vcnl4010_handle_t handle, uint8_t *status) {
   if (handle == NULL)
     return ESP_ERR_INVALID_ARG;
   return vcnl4010_write_reg(handle, VCNL4010_REG_INT_STATUS, status, 1);
+}
+
+esp_err_t vcnl4010_interrupt_init(vcnl4010_handle_t handle, uint8_t gpio_num,
+                                  bool pullup_en) {
+  if (handle == NULL)
+    return ESP_ERR_INVALID_ARG;
+  esp_err_t ret = ESP_OK;
+  ESP_LOGI(TAG, "Setting up isr handling...");
+
+  handle->int_sem = xSemaphoreCreateBinary();
+  if (handle->int_sem == NULL)
+    return ESP_ERR_NO_MEM;
+
+  const gpio_config_t io_conf = {
+      .pin_bit_mask = BIT64(gpio_num),
+      .mode = GPIO_MODE_INPUT,
+      .pull_up_en = pullup_en,
+      .pull_down_en = GPIO_PULLDOWN_DISABLE,
+      .intr_type = GPIO_INTR_NEGEDGE,
+  };
+  ESP_RETURN_ON_ERROR(gpio_config(&io_conf), TAG,
+                      "Failed to configure gpio, error: %d", ret);
+
+  ESP_RETURN_ON_ERROR(gpio_install_isr_service(0), TAG,
+                      "Failed to create ISR, error: %d", ret);
+  ESP_RETURN_ON_ERROR(
+      gpio_isr_handler_add(gpio_num, vcnl4010_isr_handler, handle), TAG,
+      "Failed to add ISR handler");
+
+  if (xTaskCreate(vcnl4010_interrupt_task, "vcnl4010_interrupt", 2048, handle,
+                  5, NULL) != pdPASS) {
+    return ESP_ERR_NO_MEM;
+  }
+
+  ESP_LOGI(TAG, "Isr handling setup done.");
+  return ESP_OK;
 }

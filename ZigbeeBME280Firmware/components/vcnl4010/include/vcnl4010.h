@@ -2,6 +2,8 @@
 
 #include "driver/i2c_types.h"
 #include "esp_err.h"
+#include "esp_event_base.h"
+
 #include <stdint.h>
 
 #define VCNL4010_I2C_ADDR 0x13
@@ -36,6 +38,14 @@
 
 #define VCNL4010_REG_PROX_TIMING 0x8F
 
+ESP_EVENT_DECLARE_BASE(VCNL4010_EVENTS);
+
+typedef enum vcnl4010_event {
+  VCNL4010_EVENT_THR_HI = (1 << 0), // 0x01
+  VCNL4010_EVENT_THR_LO = (1 << 1), // 0x02
+  VCNL4010_EVENT_ALS = (1 << 2),    // 0x04
+  VCNL4010_EVENT_PROX = (1 << 3),   // 0x08
+} vcnl4010_event_t;
 // --- Command register bits (0x80) ---
 typedef enum vcnl4010_cmd {
   VCNL4010_CMD_SELFTIMED_EN = (1 << 0),  // enable self-timed measurements
@@ -184,17 +194,28 @@ esp_err_t vcnl4010_get_ambient(vcnl4010_handle_t handle, uint16_t *value);
 esp_err_t vcnl4010_get_proximity(vcnl4010_handle_t handle, uint16_t *value);
 
 /**
- * @brief  Get the current interrupt flags
+ * @brief  VCNL4010 get the current interrupt flags
  * @param  handle: VCNL4010 handle
  * @param  status: VCNL4010 proximity interrupt status
  * @retval ESP Error code
  */
-esp_err_t vcnl4010_read_int_status(vcnl4010_handle_t handle, uint8_t * status);
+esp_err_t vcnl4010_read_int_status(vcnl4010_handle_t handle, uint8_t *status);
 
 /**
- * @brief  Clear the given interrupt flags
+ * @brief  VCNL4010 clear the given interrupt flags
  * @param  handle: VCNL4010 handle
  * @param  status: VCNL4010 proximity interrupt status
  * @retval ESP Error code
  */
-esp_err_t vcnl4010_clear_int_status(vcnl4010_handle_t handle, uint8_t * status);
+esp_err_t vcnl4010_clear_int_status(vcnl4010_handle_t handle, uint8_t *status);
+
+/**
+ * @brief  VCNL4010 setup the interrup and clear task also post the interrup
+ * event
+ * @param  handle: VCNL4010 handle
+ * @param  gpio_num: GPIO num connected to the interrupt pin
+ * @param  pullup_en: Enable gpio pullup on the pin
+ * @retval ESP Error code
+ */
+esp_err_t vcnl4010_interrupt_init(vcnl4010_handle_t handle, uint8_t gpio_num,
+                                  bool pullup_en);
