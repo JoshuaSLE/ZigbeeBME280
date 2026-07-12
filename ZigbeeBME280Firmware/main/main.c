@@ -4,11 +4,16 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "freertos/idf_additions.h"
+#include "freertos/portmacro.h"
 #include "freertos/projdefs.h"
 #include "i2c_helper.h"
 #include "sdkconfig.h"
 #include "ssd1306.h"
 #include "vcnl4010.h"
+
+#define SENSOR_SAMPLE_INTERVAL_IDLE_MS 10000
+#define SENSOR_SAMPLE_INTERVAL_ACTIVE_MS 500
+#define DISPLAY_REFRESH_INTERVAL_MS 500
 
 static const char *TAG = "Zigbee BME280";
 
@@ -19,10 +24,25 @@ static ssd1306_handle_t display_hdl;
 static bme280_handle_t bme280_hdl;
 static vcnl4010_handle_t vcnl4010_hdl;
 
+static TaskHandle_t sensor_task_hdl = NULL;
+static volatile uint32_t g_sample_interval_ms = SENSOR_SAMPLE_INTERVAL_IDLE_MS;
+
+static portMUX_TYPE sensor_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static float g_temp = 0.0f, g_press = 0.0f, g_hum = 0.0f;
+
 static esp_err_t add_i2c_devices(void);
 
 static void vcnl_event_handler(void *handler_args, esp_event_base_t base,
                                int32_t id, void *event_data);
+
+static void trigger_sensor_sample_reset(uint32_t new_interval_ms);
+
+static void update_sensor_cache(float temp, float press, float hum);
+
+static void get_sensor_cache(float *temp, float *press, float *hum);
+
+static void sensor_sampling_task(void *pvParameters);
 
 static void ui_application_task(void *pvParameters);
 
@@ -37,6 +57,9 @@ void app_main(void) {
       VCNL4010_EVENTS, ESP_EVENT_ANY_ID, &vcnl_event_handler, NULL, NULL));
 
   ESP_ERROR_CHECK(add_i2c_devices());
+
+  xTaskCreate(sensor_sampling_task, "sensor_task", 3072, NULL, 4,
+              &sensor_task_hdl);
 
   xTaskCreate(ui_application_task, "ui_task", 4096, NULL, 5, &ui_task_hdl);
 
@@ -103,35 +126,78 @@ static void vcnl_event_handler(void *handler_args, esp_event_base_t base,
   }
 }
 
+static void trigger_sensor_sample_reset(uint32_t new_interval_ms) {
+  g_sample_interval_ms = new_interval_ms;
+  if (sensor_task_hdl != NULL) {
+    xTaskNotifyGive(sensor_task_hdl);
+  }
+}
+
+static void sensor_sampling_task(void *pvParameters) {
+  while (1) {
+    float temp = 0.0f, press = 0.0f, hum = 0.0f;
+
+    if (bme280_read(bme280_hdl, &temp, &press, &hum) == ESP_OK) {
+      update_sensor_cache(temp, press, hum);
+
+      // TODO: Update Zigbee cluster attributes here
+    } else {
+      ESP_LOGE(TAG, "Failed to read BME280 sensor");
+    }
+
+    // Wait for the sample interval OR an instant wake-up notification
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(g_sample_interval_ms));
+  }
+}
+
+static void update_sensor_cache(float temp, float press, float hum) {
+  taskENTER_CRITICAL(&sensor_mux);
+  g_temp = temp;
+  g_press = press;
+  g_hum = hum;
+  taskEXIT_CRITICAL(&sensor_mux);
+}
+
+static void get_sensor_cache(float *temp, float *press, float *hum) {
+  taskENTER_CRITICAL(&sensor_mux);
+  *temp = g_temp;
+  *press = g_press;
+  *hum = g_hum;
+  taskEXIT_CRITICAL(&sensor_mux);
+}
+
 static void ui_application_task(void *pvParameters) {
   while (1) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
     ESP_LOGI(TAG, "Waking up display...");
+
+    trigger_sensor_sample_reset(SENSOR_SAMPLE_INTERVAL_ACTIVE_MS);
+
     ssd1306_enable_display(display_hdl);
 
-    const uint32_t update_interval_ms = 250;
     uint32_t elapsed_ms = 0;
 
     while (elapsed_ms < screen_on_time_ms) {
       float temp, press, hum;
-      if (bme280_read(bme280_hdl, &temp, &press, &hum) == ESP_OK) {
-        char buf[17];
-        (void)ssd1306_display_text(display_hdl, 1, "Current Readings", false);
+      get_sensor_cache(&temp, &press, &hum);
 
-        (void)snprintf(buf, sizeof(buf), "Temp: %.1fC", temp);
-        (void)ssd1306_display_text(display_hdl, 2, buf, false);
+      char buf[17];
+      (void)ssd1306_display_text(display_hdl, 1, "Current Readings", false);
 
-        (void)snprintf(buf, sizeof(buf), "Hum:  %.1f%%", hum);
-        (void)ssd1306_display_text(display_hdl, 3, buf, false);
+      (void)snprintf(buf, sizeof(buf), "Temp: %.1fC", temp);
+      (void)ssd1306_display_text(display_hdl, 2, buf, false);
 
-        (void)snprintf(buf, sizeof(buf), "Pres: %.2fkPa", press / 1000);
-        (void)ssd1306_display_text(display_hdl, 4, buf, false);
-      }
+      (void)snprintf(buf, sizeof(buf), "Hum:  %.1f%%", hum);
+      (void)ssd1306_display_text(display_hdl, 3, buf, false);
 
-      vTaskDelay(pdMS_TO_TICKS(update_interval_ms));
-      elapsed_ms += update_interval_ms;
+      (void)snprintf(buf, sizeof(buf), "Pres: %.2fkPa", press / 1000.0f);
+      (void)ssd1306_display_text(display_hdl, 4, buf, false);
 
+      vTaskDelay(pdMS_TO_TICKS(DISPLAY_REFRESH_INTERVAL_MS));
+      elapsed_ms += DISPLAY_REFRESH_INTERVAL_MS;
+
+      // Reset timer if a new proximity trigger occurs
       if (ulTaskNotifyTake(pdTRUE, 0) > 0) {
         elapsed_ms = 0;
         ESP_LOGD(TAG, "Screen timer reset due to new proximity trigger");
@@ -141,6 +207,8 @@ static void ui_application_task(void *pvParameters) {
     ESP_LOGI(TAG, "Sleeping display...");
     ssd1306_clear_display(display_hdl, false);
     ssd1306_disable_display(display_hdl);
+
+    trigger_sensor_sample_reset(SENSOR_SAMPLE_INTERVAL_IDLE_MS);
 
     ulTaskNotifyTake(pdTRUE, 0);
   }
